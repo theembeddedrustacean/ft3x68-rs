@@ -1,0 +1,54 @@
+[package]
+edition = "2021"
+name = "ft3x68-rs"
+rust-version = "1.86"
+version = "0.1.0"
+description = "A Rust driver for the FT3x68 touch controllers"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/theembeddedrustacean/ft3x68-rs"
+keywords = ["embedded", "touch", "ft3x68", "no_std"]
+categories = ["embedded"]
+readme = "README.md"
+homepage = "https://blog.theembeddedrustacean.com/"
+exclude = ["target/debug/*"]
+
+[lib]
+name = "ft3x68_rs"
+path = "./src/lib.rs"
+
+[dependencies]
+# Optional dependencies for Waveshare 1.8" AMOLED display
+critical-section = { version = "1.2.0", optional = false }
+esp-alloc = { version = "0.8.0", optional = false }
+esp-backtrace = { version = "0.17.0", optional = false, features = [
+  "esp32s3",
+  "exception-handler",
+  "panic-handler",
+  "println",
+] }
+esp-hal = { version = "=1.0.0-rc.0", optional = false, features = [
+  "esp32s3",
+  "unstable",
+] }
+esp-println = { version = "0.15.0", optional = false, features = ["esp32s3"] }
+esp-bootloader-esp-idf = { version = "0.2.0", optional = false, features = [
+  "esp32s3",
+] }
+static_cell = "2.1.1"
+embedded-hal = "1.0.0"
+embedded-hal-bus = "0.3.0"
+
+
+[profile.dev]
+# Rust debug is too slow.
+# For debug builds always builds with some optimization
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1        # LLVM can perform better optimizations using a single thread
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = 's'
+overflow-checks = false
