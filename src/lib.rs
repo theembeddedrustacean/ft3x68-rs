@@ -51,6 +51,7 @@
 #![no_std]
 use embedded_hal::delay::DelayNs;
 use embedded_hal::i2c::I2c;
+use heapless::Vec;
 
 // Constants for FT3x68 device addresses and registers
 pub const FT3168_DEVICE_ADDRESS: u8 = 0x38;
@@ -99,6 +100,16 @@ pub struct TouchPoint {
     pub x: u16,
     pub y: u16,
 }
+
+/// Represents the touch state - either active with coordinates or released
+#[derive(Debug)]
+pub enum TouchState {
+    /// Touch is active with coordinates
+    Pressed(TouchPoint),
+    /// Touch was released (no active touches)
+    Released,
+}
+
 
 /// Trait for controlling the FT3x658 hardware reset pin.
 pub trait ResetInterface {
@@ -246,8 +257,13 @@ where
         Ok(buffer[0])
     }
 
-    /// Reads the coordinates of the first touch point.
-    pub fn touch1(&mut self) -> Result<TouchPoint, I2C::Error> {
+    /// Reads the state of the first touch point or detects a release.
+    pub fn touch1(&mut self) -> Result<TouchState, I2C::Error> {
+        let fingers = self.finger_number()?;
+        if fingers == 0 {
+            return Ok(TouchState::Released);
+        }
+
         let mut data = [0u8; 4];
         self.i2c
             .write_read(self.device_address, &[FT3X68_RD_DEVICE_X1POSH], &mut data)?;
@@ -255,11 +271,16 @@ where
         let x = ((data[0] as u16 & 0x0F) << 8) | data[1] as u16;
         let y = ((data[2] as u16 & 0x0F) << 8) | data[3] as u16;
 
-        Ok(TouchPoint { x, y })
+        Ok(TouchState::Pressed(TouchPoint { x, y }))
     }
 
-    /// Reads the coordinates of the second touch point.
-    pub fn touch2(&mut self) -> Result<TouchPoint, I2C::Error> {
+    /// Reads the state of the second touch point or detects if no second touch exists.
+    pub fn touch2(&mut self) -> Result<TouchState, I2C::Error> {
+        let fingers = self.finger_number()?;
+        if fingers < 2 {
+            return Ok(TouchState::Released);
+        }
+
         let mut data = [0u8; 4];
         self.i2c
             .write_read(self.device_address, &[FT3X68_RD_DEVICE_X2POSH], &mut data)?;
@@ -267,6 +288,26 @@ where
         let x = ((data[0] as u16 & 0x0F) << 8) | data[1] as u16;
         let y = ((data[2] as u16 & 0x0F) << 8) | data[3] as u16;
 
-        Ok(TouchPoint { x, y })
+        Ok(TouchState::Pressed(TouchPoint { x, y }))
+    }
+
+    /// Returns all active touch points up to the maximum supported (typically 2).
+    pub fn get_touches(&mut self) -> Result<Vec<TouchPoint, 2>, I2C::Error> {
+        let mut touches = Vec::new();
+        let fingers = self.finger_number()?;
+
+        if fingers >= 1 {
+            if let TouchState::Pressed(point) = self.touch1()? {
+                touches.push(point).ok(); // Ignore error if Vec is full
+            }
+        }
+
+        if fingers >= 2 {
+            if let TouchState::Pressed(point) = self.touch2()? {
+                touches.push(point).ok(); // Ignore error if Vec is full
+            }
+        }
+
+        Ok(touches)
     }
 }

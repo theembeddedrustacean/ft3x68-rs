@@ -2,7 +2,7 @@
 edition = "2021"
 name = "ft3x68-rs"
 rust-version = "1.86"
-version = "0.1.1"
+version = "0.1.2"
 description = "A Rust driver for the FT3x68 touch controllers"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/theembeddedrustacean/ft3x68-rs"
@@ -37,6 +37,7 @@ esp-bootloader-esp-idf = { version = "0.2.0", optional = true, features = [
 static_cell = { version = "2.1.1", optional = true }
 embedded-hal = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", optional = true }
+heapless = "0.8"
 
 
 [profile.dev]
