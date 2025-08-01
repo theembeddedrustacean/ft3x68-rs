@@ -45,6 +45,14 @@ loop {
 }
 ```
 
+## Running the Example
+
+To run the example demonstrating touch support:
+
+```bash
+cargo run --release --example touch --all-features
+```
+
 > **Notes:**
 > - To detect gestures, the gesture mode must be first enabled using the `set_gesture_mode` method.
 > - If the reset pin is controlled via an I2C GPIO expander sharing the same bus with the touch driver, you should use the `embedded_hal_bus` to manage multiple instances of I2C. Refer to the examples folder to see how that looks like.
