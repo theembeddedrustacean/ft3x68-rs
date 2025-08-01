@@ -110,7 +110,6 @@ pub enum TouchState {
     Released,
 }
 
-
 /// Trait for controlling the FT3x658 hardware reset pin.
 pub trait ResetInterface {
     /// The specific error type for this reset implementation.
