@@ -48,7 +48,7 @@
 //! - To detect gestures, the gesture mode must be enabled using the `set_gesture_mode` method.
 //! - If the reset pin is controlled via an I2C GPIO expander sharing the same bus with the touch driver, you should use the `embedded_hal_bus` to manage multiple instances of I2C. Refer to the examples folder to see how that looks like.
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 use embedded_hal::delay::DelayNs;
 use embedded_hal::i2c::I2c;
 use heapless::Vec;
@@ -252,8 +252,9 @@ where
         })
     }
 
-    /// Reads the number of active touch points.
-    pub fn finger_number(&mut self) -> Result<u8, I2C::Error> {
+    /// Reads the raw TD_STATUS register. Bits [7:4] are reserved and must not
+    /// be treated as part of the touch count; use `touch_count` for that.
+    fn finger_number_raw(&mut self) -> Result<u8, I2C::Error> {
         let mut buffer = [0u8; 1];
         self.i2c.write_read(
             self.device_address,
@@ -263,6 +264,33 @@ where
         Ok(buffer[0])
     }
 
+    /// Reads the number of active touch points. Per the FT6x06 CTPM register
+    /// map, TD_STATUS bits [3:0] hold the count and bits [7:4] are reserved,
+    /// so the raw byte is masked before use.
+    pub fn finger_number(&mut self) -> Result<u8, I2C::Error> {
+        Ok(self.finger_number_raw()? & 0x0F)
+    }
+
+    /// Reads a touch point's coordinate registers and its event flag (the top
+    /// two bits of the XH register), returning `None` when the flag reports
+    /// lift-up or no-event rather than an active contact.
+    fn read_point(&mut self, xh_register: u8) -> Result<Option<TouchPoint>, I2C::Error> {
+        let mut data = [0u8; 4];
+        self.i2c
+            .write_read(self.device_address, &[xh_register], &mut data)?;
+
+        // 00b: press down, 01b: lift up, 10b: contact, 11b: no event.
+        match data[0] >> 6 {
+            0b01 | 0b11 => return Ok(None),
+            _ => {}
+        }
+
+        let x = ((data[0] as u16 & 0x0F) << 8) | data[1] as u16;
+        let y = ((data[2] as u16 & 0x0F) << 8) | data[3] as u16;
+
+        Ok(Some(TouchPoint { x, y }))
+    }
+
     /// Reads the state of the first touch point or detects a release.
     pub fn touch1(&mut self) -> Result<TouchState, I2C::Error> {
         let fingers = self.finger_number()?;
@@ -270,14 +298,10 @@ where
             return Ok(TouchState::Released);
         }
 
-        let mut data = [0u8; 4];
-        self.i2c
-            .write_read(self.device_address, &[FT3X68_RD_DEVICE_X1POSH], &mut data)?;
-
-        let x = ((data[0] as u16 & 0x0F) << 8) | data[1] as u16;
-        let y = ((data[2] as u16 & 0x0F) << 8) | data[3] as u16;
-
-        Ok(TouchState::Pressed(TouchPoint { x, y }))
+        Ok(match self.read_point(FT3X68_RD_DEVICE_X1POSH)? {
+            Some(point) => TouchState::Pressed(point),
+            None => TouchState::Released,
+        })
     }
 
     /// Reads the state of the second touch point or detects if no second touch exists.
@@ -287,14 +311,10 @@ where
             return Ok(TouchState::Released);
         }
 
-        let mut data = [0u8; 4];
-        self.i2c
-            .write_read(self.device_address, &[FT3X68_RD_DEVICE_X2POSH], &mut data)?;
-
-        let x = ((data[0] as u16 & 0x0F) << 8) | data[1] as u16;
-        let y = ((data[2] as u16 & 0x0F) << 8) | data[3] as u16;
-
-        Ok(TouchState::Pressed(TouchPoint { x, y }))
+        Ok(match self.read_point(FT3X68_RD_DEVICE_X2POSH)? {
+            Some(point) => TouchState::Pressed(point),
+            None => TouchState::Released,
+        })
     }
 
     /// Returns all active touch points up to the maximum supported (typically 2).
@@ -315,5 +335,111 @@ where
         }
 
         Ok(touches)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use embedded_hal_mock::eh1::i2c::{Mock as I2cMock, Transaction as I2cTransaction};
+
+    struct NoReset;
+    impl ResetInterface for NoReset {
+        type Error = ();
+        fn reset(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    fn driver(
+        i2c: I2cMock,
+    ) -> Ft3x68Driver<I2cMock, embedded_hal_mock::eh1::delay::NoopDelay, NoReset> {
+        Ft3x68Driver::new(
+            i2c,
+            FT3168_DEVICE_ADDRESS,
+            NoReset,
+            embedded_hal_mock::eh1::delay::NoopDelay::new(),
+        )
+    }
+
+    /// A reserved bit set alongside a zero touch count must still read as no
+    /// touch points: TD_STATUS bits [7:4] are reserved, not part of the count.
+    #[test]
+    fn finger_number_masks_reserved_bits() {
+        let expectations = [I2cTransaction::write_read(
+            FT3168_DEVICE_ADDRESS,
+            vec![FT3X68_RD_DEVICE_FINGERNUM],
+            vec![0x80],
+        )];
+        let mut i2c = I2cMock::new(&expectations);
+        assert_eq!(driver(i2c.clone()).finger_number().unwrap(), 0);
+        i2c.done();
+    }
+
+    /// A reserved bit set on TD_STATUS must not be read as a live touch: this
+    /// is the phantom-press failure mode measured on an FT6336U, where a set
+    /// reserved bit kept the stale coordinate registers reporting as a held
+    /// press after the finger lifted.
+    #[test]
+    fn touch1_ignores_reserved_status_bits_with_no_fingers() {
+        let expectations = [I2cTransaction::write_read(
+            FT3168_DEVICE_ADDRESS,
+            vec![FT3X68_RD_DEVICE_FINGERNUM],
+            vec![0x80],
+        )];
+        let mut i2c = I2cMock::new(&expectations);
+        let state = driver(i2c.clone()).touch1().unwrap();
+        assert!(matches!(state, TouchState::Released));
+        i2c.done();
+    }
+
+    /// A lift-up event flag (01b) on the XH register must resolve to
+    /// released even though the count still reads nonzero for this poll.
+    #[test]
+    fn touch1_treats_lift_up_event_flag_as_released() {
+        let expectations = [
+            I2cTransaction::write_read(
+                FT3168_DEVICE_ADDRESS,
+                vec![FT3X68_RD_DEVICE_FINGERNUM],
+                vec![0x01],
+            ),
+            I2cTransaction::write_read(
+                FT3168_DEVICE_ADDRESS,
+                vec![FT3X68_RD_DEVICE_X1POSH],
+                vec![0b0100_0000, 0x10, 0x00, 0x20],
+            ),
+        ];
+        let mut i2c = I2cMock::new(&expectations);
+        let state = driver(i2c.clone()).touch1().unwrap();
+        assert!(matches!(state, TouchState::Released));
+        i2c.done();
+    }
+
+    /// A press-down event flag (00b) with the count masked to one still
+    /// resolves to the touch point, with reserved status bits ignored.
+    #[test]
+    fn touch1_reports_pressed_point_on_press_down() {
+        let expectations = [
+            I2cTransaction::write_read(
+                FT3168_DEVICE_ADDRESS,
+                vec![FT3X68_RD_DEVICE_FINGERNUM],
+                vec![0xF1],
+            ),
+            I2cTransaction::write_read(
+                FT3168_DEVICE_ADDRESS,
+                vec![FT3X68_RD_DEVICE_X1POSH],
+                vec![0b0000_0001, 0x10, 0x00, 0x20],
+            ),
+        ];
+        let mut i2c = I2cMock::new(&expectations);
+        let state = driver(i2c.clone()).touch1().unwrap();
+        match state {
+            TouchState::Pressed(point) => {
+                assert_eq!(point.x, 0x0110);
+                assert_eq!(point.y, 0x0020);
+            }
+            TouchState::Released => panic!("expected a pressed touch point"),
+        }
+        i2c.done();
     }
 }
